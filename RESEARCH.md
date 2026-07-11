@@ -1,7 +1,7 @@
 # Morpheus-WASM: Research Notes
 
 > **Goal**: Run the Morpheus v2 Basque autocomplete model entirely in the
-> browser, deployed as a free HuggingFace Static Space, using
+> browser, deployed as a free GitHub Pages site, using
 > [wllama](https://github.com/ngxson/wllama) (WebAssembly binding for
 > llama.cpp).
 
@@ -23,7 +23,8 @@ retokenization fallback, sticky merge, next-word candidate extraction). This
 works for local Docker deployments and on the GPU server, but **cannot be
 hosted for free on HuggingFace Spaces** — as of July 2026, both Docker and
 Gradio Spaces require a paid PRO/Team/Enterprise plan. Only **Static Spaces**
-(plain HTML/CSS/JS, no server-side execution) remain free.
+(plain HTML/CSS/JS, no server-side execution) remain free, but we'll use
+**GitHub Pages** instead for better control and no HF dependencies.
 
 ### The Opportunity
 
@@ -41,9 +42,9 @@ zero-infrastructure** public demo that anyone can use by visiting a URL.
 
 ---
 
-## 2. The HF Spaces Paywall (July 2026)
+## 2. Deployment Platform: GitHub Pages
 
-### What Happened
+### Why Not HuggingFace Spaces
 
 On ~July 8, 2026, HuggingFace moved Docker **and** Gradio Spaces behind a
 paywall. Free accounts can no longer create CPU Basic Docker or Gradio Spaces.
@@ -56,26 +57,58 @@ on free cpu-basic requires a Team or Enterprise plan for organization itzune.
 Subscribe at https://huggingface.co/enterprise"
 ```
 
-Forum discussions confirming this:
+HF Static Spaces (plain HTML/CSS/JS) remain free, but have limitations:
+- Spaces sleep after inactivity (cold starts)
+- Limited control over HTTP headers (needed for multi-threaded WASM)
+- Tied to HF infrastructure
+
+### Why GitHub Pages
+
+GitHub Pages is free, always-on, and gives full control over the repository:
+
+| Property | GitHub Pages | HF Static Space |
+|----------|-------------|-----------------|
+| Cost | Free | Free |
+| Always on | ✅ | ❌ (sleeps after inactivity) |
+| Custom HTTP headers | ❌ (limitation) | ❌ |
+| Custom domain | ✅ | ✅ (PRO only) |
+| HTTPS | ✅ | ✅ |
+| Build from repo | ✅ (Actions or Jekyll) | ✅ |
+| Independence from HF | ✅ | ❌ |
+
+**One limitation**: GitHub Pages does not support custom HTTP headers. This
+means `Cross-Origin-Embedder-Policy` (COEP) and `Cross-Origin-Opener-Policy`
+(COOP) cannot be set, which disables wllama's multi-threaded WASM mode.
+However:
+
+1. **WebGPU doesn't need COOP/COEP** — the primary acceleration path works fine.
+2. **wllama falls back to single-threaded WASM automatically** when COOP/COEP
+   are absent — slower but functional.
+3. **A service worker can inject COOP/COEP headers** even on GitHub Pages
+   (known technique used by many WASM projects). This is a Phase 2+ optimization.
+4. The model is 91M params — single-threaded WASM SIMD is adequate for
+   real-time autocomplete at this scale.
+
+### GitHub Pages Setup
+
+The repo (`itzune/morpheus-wasm`) will be published via GitHub Pages:
+
+1. Push to `github.com/itzune/morpheus-wasm`
+2. Settings → Pages → Source: `main` branch, `/` root
+3. Site live at `https://itzune.github.io/morpheus-wasm/`
+
+No build step needed for a static site (no Jekyll). GitHub Actions can be added
+later for bundling/minification if needed.
+
+### HF Spaces Paywall (for reference)
+
+Forum discussions confirming the July 2026 change:
 - [Docker SDK now marked as "Paid" when creating a new Space?](https://discuss.huggingface.co/t/docker-sdk-now-marked-as-paid-when-creating-a-new-space/177580)
 - [New free accounts cannot create CPU Basic Gradio Spaces](https://discuss.huggingface.co/t/new-free-accounts-cannot-create-cpu-basic-gradio-spaces-only-zerogpu-available/177629)
 
-Account status confirmed:
+Account status (confirmed):
 - `xezpeleta` personal account: `isPro: False`
 - `itzune` org: `canPay: False`
-
-### What Remains Free
-
-| Space type | Free? | What it is |
-|-----------|-------|------------|
-| **Static** | ✅ Free | Plain HTML/CSS/JS, served as static files. No server-side code. |
-| Gradio | ❌ Paid | Python Gradio app, needs server process |
-| Docker | ❌ Paid | Custom Docker container, needs server process |
-| ZeroGPU | Limited | GPU-accelerated, quota-limited, not suitable for always-on demo |
-
-The wllama demo itself (`huggingface.co/spaces/ngxson/wllama`) uses
-`sdk: static` — confirming that browser-based inference on a Static Space is
-the intended free path.
 
 ---
 
@@ -222,7 +255,7 @@ wllama's API:
 
 ## 6. Project Plan
 
-### Phase 1: Proof of Concept (Static Space + simple completion)
+### Phase 1: Proof of Concept (GitHub Pages + simple completion)
 
 **Goal**: Validate that wllama can load our Mamba-2 GGUF and produce correct
 Basque completions in the browser.
@@ -233,7 +266,7 @@ Basque completions in the browser.
   `wllama.loadModelFromHF()`
 - Calls `wllama.createCompletion()` with greedy params
 - Displays completion as ghost text
-- Deployed as a HF Static Space
+- Deployed to GitHub Pages
 
 **Success criteria**:
 - Model loads without errors
@@ -266,7 +299,7 @@ Basque completions in the browser.
 - Responsive mobile-first design
 - Model download progress bar (55MB, cached by browser after first load)
 - Fallback messaging if WebGPU unavailable
-- HF Static Space deployed at `huggingface.co/spaces/itzune/morpheus-wasm`
+- Deployed to GitHub Pages at `https://itzune.github.io/morpheus-wasm/`
 - README with screenshots and usage instructions
 
 ### Phase 4: Evaluation (optional)
@@ -282,13 +315,14 @@ Basque completions in the browser.
 
 ## 7. Technical Decisions
 
-### Static Space vs Docker Space
+### Static Space vs Docker Space vs GitHub Pages
 
-**Decision**: Static Space.
+**Decision**: GitHub Pages.
 
-Docker Spaces require a paid plan (confirmed July 2026). Static Spaces are free
-and sufficient for client-side inference. The wllama demo itself uses a Static
-Space.
+Docker Spaces require a paid plan (confirmed July 2026). HF Static Spaces are
+free but sleep after inactivity and offer less control. GitHub Pages is free,
+always-on, and independent from HuggingFace infrastructure. The only trade-off
+is no custom HTTP headers (affects multi-threaded WASM, see COOP/COEP below).
 
 ### wllama vs transformers.js
 
@@ -321,12 +355,22 @@ Safari 18+) and falls back to WASM SIMD otherwise. We should:
 ### COOP/COEP Headers
 
 wllama's multi-threaded WASM requires `Cross-Origin-Embedder-Policy:
-require-corp` and `Cross-Origin-Opener-Policy: same-origin` headers. HF Static
-Spaces serve static files — we need to verify these headers can be set.
-If not, wllama falls back to single-threaded (slower but functional).
+require-corp` and `Cross-Origin-Opener-Policy: same-origin` headers.
+**GitHub Pages does not support custom HTTP headers**, so multi-threaded
+WASM will not be available by default.
 
-The wllama demo Space works, so either HF sets these headers for Static Spaces,
-or wllama handles their absence gracefully. Need to test.
+This is acceptable because:
+1. **WebGPU** (the primary acceleration) does not require COOP/COEP.
+2. wllama automatically falls back to **single-threaded WASM SIMD** when the
+   headers are absent — slower but functional.
+3. At 91M params, single-threaded inference is adequate for real-time
+   autocomplete (a few tokens per keystroke).
+4. A **service worker** can inject COOP/COEP headers even on GitHub Pages
+   (known technique). This is a Phase 2+ optimization if single-threaded
+   performance is insufficient.
+
+The wllama demo (on HF Static Space) works, confirming that headerless hosting
+is viable for wllama.
 
 ---
 
@@ -362,20 +406,25 @@ for autocomplete).
 
 ### Cross-Origin Headers
 
-**Risk**: HF Static Spaces may not set COOP/COEP headers, disabling
+**Risk**: GitHub Pages doesn't support COOP/COEP headers, disabling
 multi-threaded WASM.
 
-**Mitigation**: wllama falls back to single-threaded automatically. Performance
-will be worse but functional. Can also use WebGPU which doesn't need
-multi-threaded WASM.
+**Mitigation**: wllama falls back to single-threaded automatically. WebGPU
+(the primary path) doesn't need these headers. A service worker can inject
+them if needed (Phase 2+ optimization). At 91M params, single-threaded
+performance is adequate.
 
 ### GGUF File Hosting
 
-**Risk**: The GGUF file on HF Hub might have CORS restrictions.
+**Risk**: The GGUF file on HF Hub might have CORS restrictions when loaded
+from a GitHub Pages site.
 
-**Mitigation**: HF Hub serves files with permissive CORS. wllama's
-`loadModelFromHF()` is designed for this. The wllama demo loads models from HF
-Hub without issues.
+**Mitigation**: HF Hub serves files with permissive CORS (`Access-Control-Allow-Origin: *`).
+wllama's `loadModelFromHF()` is designed for cross-origin loading. The wllama
+demo (on HF) loads models from HF Hub without issues, and cross-origin loading
+from GitHub Pages to HF Hub is a standard pattern. If CORS issues arise, the
+GGUF can be hosted in the GitHub repo itself (55MB, under GitHub's 100MB file
+limit) or via a CDN.
 
 ---
 
@@ -385,34 +434,29 @@ Hub without issues.
 morpheus-wasm/
 ├── README.md              ← Project overview
 ├── RESEARCH.md            ← This file
-├── index.html             ← Main entry point (Static Space root)
+├── index.html             ← Main entry point (GitHub Pages root)
 ├── app.js                 ← Application logic (wllama calls, UI)
 ├── style.css              ← Styling
 ├── keyboard.js            ← Virtual keyboard + chip logic (Phase 2)
 ├── inf-engine.js          ← Inference engineering port (Phase 2)
 │                            (retokenization fallback, sticky merge, etc.)
-└── vendor/
-    └── wllama/            ← wllama WASM + JS (from CDN or npm build)
+├── vendor/
+│   └── wllama/            ← wllama WASM + JS (from CDN or npm build)
+└── .github/
+    └── workflows/
+        └── deploy.yml     ← GitHub Actions: deploy to Pages (optional,
+                             can also use built-in Pages from main branch)
 ```
 
-For the HF Static Space, the `README.md` needs YAML front matter:
-
-```yaml
----
-title: Morpheus Basque Autocomplete
-emoji: ⌨️
-colorFrom: blue
-colorTo: green
-sdk: static
----
-```
+No YAML front matter needed for GitHub Pages (unlike HF Static Spaces). Just
+push to `main` and enable Pages in repo settings.
 
 ---
 
 ## 10. References
 
 - **wllama**: https://github.com/ngxson/wllama
-- **wllama demo (Static Space)**: https://huggingface.co/spaces/ngxson/wllama
+- **wllama demo (Static Space on HF)**: https://huggingface.co/spaces/ngxson/wllama
 - **wllama docs**: https://github.ngxson.com/wllama/docs/
 - **wllama basic example**: https://github.ngxson.com/wllama/examples/basic/
 - **wllama V3 guide (WebGPU)**: https://github.com/ngxson/wllama/blob/master/guides/intro-v3.md
@@ -431,7 +475,7 @@ sdk: static
 - [x] Research completed (this document)
 - [ ] Phase 1: Proof of concept (simple completion in browser)
 - [ ] Phase 2: Predictive keyboard (full port)
-- [ ] Phase 3: Polish & deploy to HF Static Space
+- [ ] Phase 3: Polish & deploy to GitHub Pages
 - [ ] Phase 4: Evaluation (optional)
 
 **Next action**: Build the Phase 1 proof of concept — a minimal HTML page that
