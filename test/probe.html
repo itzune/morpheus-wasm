@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>wllama version probe</title></head>
+<body>
+<pre id="out"></pre>
+<script type="module">
+const out = document.getElementById('out');
+const log = (...a) => { out.textContent += a.join(' ') + '\n'; console.log(...a); };
+
+const v = new URLSearchParams(location.search).get('v');
+if (!v) { log('no ?v= given'); throw new Error('no v'); }
+log('=== probing wllama@' + v + ' ===');
+
+const CDN = `https://cdn.jsdelivr.net/npm/@wllama/wllama@${v}`;
+const { Wllama } = await import(`${CDN}/esm/index.js`);
+log('imported. libllama:', Wllama.getLibllamaVersion());
+
+const w = new Wllama({ 'default': `${CDN}/src/wasm/wllama.wasm` });
+log('WebGPU:', w.isSupportWebGPU());
+
+try {
+  await w.loadModelFromHF(
+    { repo: 'itzune/morpheus-gguf', file: 'morpheus-v2-mamba.Q4_K_M.gguf' },
+    { n_ctx: 2048 }
+  );
+  const meta = w.getModelMetadata();
+  log('LOADED OK. arch:', meta.meta?.['general.architecture'],
+      '| vocab:', meta.hparams?.nVocab, '| layers:', meta.hparams?.nLayer);
+  log('add_bos:', w.mustAddBosToken(), '| eos:', w.getEOS());
+
+  // Try a greedy completion
+  const r = await w.createCompletion({
+    prompt: 'Kaixo, zer ', max_tokens: 16, temperature: 0, top_p: 1.0, stream: false,
+  });
+  const txt = r.choices?.[0]?.text ?? '(no text)';
+  log('COMPLETION of "Kaixo, zer ":', JSON.stringify(txt));
+  log('timings:', JSON.stringify(r.timings));
+  log('RESULT: SUCCESS');
+} catch (e) {
+  log('LOAD/COMPLETION ERROR:', e?.message || e);
+  log('RESULT: FAILURE');
+}
+</script>
+</body></html>

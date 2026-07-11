@@ -185,8 +185,8 @@ constraints — it's smaller than most models wllama is designed to run.
 
 | File | Size | Bits/weight | Notes |
 |------|------|-------------|-------|
-| `step_0074000.Q4_K_M.gguf` | 55MB | 4.64 | Default, smallest |
-| `step_0074000.Q5_K_M.gguf` | 66MB | 5.60 | Higher quality |
+| `morpheus-v2-mamba.Q4_K_M.gguf` | 55MB | 4.64 | Default, smallest |
+| `morpheus-v2-mamba.Q5_K_M.gguf` | 66MB | 5.60 | Higher quality |
 
 Both are well under the 2GB wllama limit. No splitting needed.
 
@@ -262,7 +262,7 @@ Basque completions in the browser.
 
 **Deliverables**:
 - Static HTML page with a text input
-- Loads `step_0074000.Q4_K_M.gguf` from `itzune/morpheus-gguf` via
+- Loads `morpheus-v2-mamba.Q4_K_M.gguf` from `itzune/morpheus-gguf` via
   `wllama.loadModelFromHF()`
 - Calls `wllama.createCompletion()` with greedy params
 - Displays completion as ghost text

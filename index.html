@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="eu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Morpheus — Euskal autocomplete (in-browser)</title>
+  <meta name="description" content="A 91M-parameter Mamba-2 Basque language model running entirely in your browser via wllama (WebAssembly + WebGPU). No server.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232563eb'/><text x='50' y='70' font-size='60' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'>M</text></svg>">
+</head>
+<body>
+  <div class="container">
+
+    <!-- ── Header ── -->
+    <header>
+      <div class="brand">
+        <div class="logo">M</div>
+        <h1>Morpheus</h1>
+        <span class="ver">WASM · Phase 1</span>
+      </div>
+      <div class="subtitle">
+        91M-parameter Mamba-2 Basque language model, running fully in your browser via
+        <a href="https://github.com/ngxson/wllama" target="_blank" rel="noopener">wllama</a>.
+        No server, no API key — inference happens on your device.
+      </div>
+    </header>
+
+    <!-- ── Loading panel (shown first; replaced by editor when ready) ── -->
+    <div class="card loading-panel" id="loadingPanel">
+      <div class="icon-wrap spin" id="loadIcon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+        </svg>
+      </div>
+      <h2 id="loadTitle">Initializing wllama runtime…</h2>
+      <div class="status-text" id="loadStatus">
+        Loading the WebAssembly binding for llama.cpp.
+      </div>
+
+      <div class="progress-wrap" id="progressWrap" style="display:none;">
+        <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+        <div class="progress-meta">
+          <span id="progressLabel">Downloading model</span>
+          <span id="progressPct">0%</span>
+        </div>
+      </div>
+
+      <div class="badges" id="loadBadges">
+        <span class="badge" id="badgeBackend"><span class="dot"></span>detecting backend…</span>
+      </div>
+
+      <div class="banner" id="loadBanner"></div>
+    </div>
+
+    <!-- ── Editor (hidden until model is loaded) ── -->
+    <div class="card editor-card hidden" id="editorCard">
+      <div class="editor-wrapper">
+        <textarea id="editor" rows="6" spellcheck="false"
+          autocomplete="off" autocorrect="off" autocapitalize="off"
+          placeholder="Idatzi hemen… (e.g. 'Kaixo, zer ')"></textarea>
+      </div>
+
+      <div class="status-strip">
+        <span class="metric"><span class="live-dot"></span> <b id="mBackend">ready</b></span>
+        <span class="metric">latency <b id="mLatency">—</b></span>
+        <span class="metric">tokens/s <b id="mTps">—</b></span>
+        <span class="spacer"></span>
+        <span class="metric" id="mHint">Tab = accept</span>
+      </div>
+
+      <div class="examples">
+        <div class="label">Try a prompt</div>
+        <div class="chips" id="exampleChips">
+          <span class="chip" data-text="Kaixo, zer ">Kaixo, zer </span>
+          <span class="chip" data-text="Nire izena ">Nire izena </span>
+          <span class="chip" data-text="Gaur egun, euskara ">Gaur egun, euskara </span>
+          <span class="chip" data-text="Euskal Herria ">Euskal Herria </span>
+          <span class="chip" data-text="Bihar joango naiz ">Bihar joango naiz </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="hint">
+      Type Basque text — a grey <em>ghost</em> continuation appears. Press <kbd>Tab</kbd> to accept it,
+      or keep typing to dismiss it. The model is downloaded once (≈55&nbsp;MB) and cached by your browser.
+    </div>
+
+    <details class="debug">
+      <summary>Debug log</summary>
+      <pre id="debugLog"></pre>
+    </details>
+
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
