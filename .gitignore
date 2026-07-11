@@ -1,5 +1,4 @@
-# Model binaries (~55 MB each) — never commit; load from HF in production
-# or regenerate locally with: python3 test/patch-headcount.py
+# Model binaries (~55 MB) — regenerate with: python3 test/patch-gguf.py
 model/*.gguf
 
 # Test screenshots
@@ -7,7 +6,6 @@ test/*.png
 
 # Node / tooling
 node_modules/
-package-lock.json
 
 # Editor / OS cruft
 .DS_Store

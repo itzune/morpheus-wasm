@@ -83,7 +83,7 @@ const state = await page.evaluate(() => {
     ghostActive: $('editor')?.classList.contains('ghost-active'),
     mBackend: $('mBackend')?.textContent,
     mLatency: $('mLatency')?.textContent,
-    mTps: $('mTps')?.textContent,
+    mConfidence: $('mConfidence')?.textContent,
     loadTitle: $('loadTitle')?.textContent,
     loadStatus: $('loadStatus')?.textContent,
     badgeBackend: $('badgeBackend')?.textContent,

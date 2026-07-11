@@ -23,6 +23,10 @@
         <a href="https://github.com/ngxson/wllama" target="_blank" rel="noopener">wllama</a>.
         No server, no API key — inference happens on your device.
       </div>
+      <nav class="mode-nav">
+        <a class="mode-nav-item active" href="./">Ghost text</a>
+        <a class="mode-nav-item" href="keyboard.html">Predictive keyboard →</a>
+      </nav>
     </header>
 
     <!-- ── Loading panel (shown first; replaced by editor when ready) ── -->
@@ -63,7 +67,7 @@
       <div class="status-strip">
         <span class="metric"><span class="live-dot"></span> <b id="mBackend">ready</b></span>
         <span class="metric">latency <b id="mLatency">—</b></span>
-        <span class="metric">tokens/s <b id="mTps">—</b></span>
+        <span class="metric">confidence <b id="mConfidence">—</b></span>
         <span class="spacer"></span>
         <span class="metric" id="mHint">Tab = accept</span>
       </div>
@@ -83,6 +87,9 @@
     <div class="hint">
       Type Basque text — a grey <em>ghost</em> continuation appears. Press <kbd>Tab</kbd> to accept it,
       or keep typing to dismiss it. The model is downloaded once (≈55&nbsp;MB) and cached by your browser.
+      <br><br>
+      Also try the <a href="keyboard.html">predictive keyboard mode</a> — a phone-style
+      chat UI with word suggestion chips and an on-screen virtual keyboard.
     </div>
 
     <details class="debug">

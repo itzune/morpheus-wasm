@@ -1,76 +1,65 @@
 // ──────────────────────────────────────────────────────────────────
-// Morpheus-WASM — Phase 1 POC
+// Morpheus-WASM — Ghost-text autocomplete mode
 //
-// Loads the Morpheus v2 Mamba-2 Basque GGUF (91M params, Q4_K_M, 55MB)
-// entirely in the browser via wllama (WebAssembly binding for llama.cpp),
-// then produces greedy Basque completions shown as inline ghost text.
+// Loads a 91M-parameter Mamba-2 GGUF (Q4_K_M, 55 MB) entirely client-side
+// via wllama (WebAssembly llama.cpp), then produces greedy Basque
+// completions shown as inline ghost text.  No backend server.
 //
-// No backend server. Inference runs on WebGPU when available, with an
-// automatic fallback to single-threaded WASM SIMD.
+// Shared model loading + token helpers live in morpheus.js.
+// Inference strategies ported from the Python demo (demo/server.py):
+//   - Digit-token repair via n_probs logprobs + re-generate from swap point
+//   - filter_suggestion (strip artifacts, collapse punct, reject pure-punct)
+//   - ghost_suffix (overlap computation, punct dedup)
+//   - Byte-fallback garbage detection + retokenization fallback
+//   - Confidence threshold (min 18 %)
+// Tokenization fidelity is guaranteed by the UGM-patched GGUF (Viterbi
+// algorithm matching the reference SentencePiece unigram model).
 // ──────────────────────────────────────────────────────────────────
 
-import { Wllama } from 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.5.1/esm/index.js';
+import {
+  CONFIG, IS_LOCAL, MODEL_LOCAL, MODEL_SIZE_MB,
+  loadModel, complete,
+  tokenHasDigit, hasByteFallbackGarbage, isPurePunct,
+  extractCurrentWord, extractFirstWord,
+  filterSuggestion,
+} from './morpheus.js';
 
-// ── Config ────────────────────────────────────────────────────────
-const WLLAMA_VERSION = '3.5.1';
-const WLLAMA_CDN = `https://cdn.jsdelivr.net/npm/@wllama/wllama@${WLLAMA_VERSION}`;
-// The wllama.wasm binary. wllama's Web Worker code is embedded inside the
-// ESM bundle (built via Blob), so this is the only binary asset we point at.
-const WLLAMA_WASM = `${WLLAMA_CDN}/src/wasm/wllama.wasm`;
-
-const MODEL_REPO = 'itzune/morpheus-gguf';
-// NOTE on the filename: the upstream llama.cpp HF converter writes
-// `mamba2.attention.head_count = 0` (commented "unused"). wllama 3.5.1's
-// bundled llama.cpp (dd4623a) uses head_count to compute the ssm_in tensor
-// width, so 0 makes it reject the model ("wrong shape; expected 768,3200
-// got 768,3224"). The patched file below sets head_count = 24
-// (= d_inner/head_dim = dt_rank), which is the correct value and loads in
-// wllama while staying compatible with newer llama.cpp (which uses dt_rank).
-const MODEL_FILE = 'morpheus-v2-mamba.Q4_K_M.wllama.gguf';
-// When served from localhost, load the model from the same origin (faster,
-// no HF round-trip) — served by test/range_server.py with HTTP Range support.
-// Otherwise (e.g. GitHub Pages) fetch from the HuggingFace Hub.
-const MODEL_LOCAL_URL = './model/morpheus-v2-mamba.Q4_K_M.wllama.gguf';
-const IS_LOCAL = ['localhost', '127.0.0.1', '0.0.0.0'].includes(location.hostname);
-const MODEL_SIZE_MB = 55;
-
-// Inference params. The model was trained with NO BOS token (the GGUF carries
-// add_bos_token=false), and autocomplete uses greedy decoding (temperature=0).
-const N_CTX = 2048;          // context window — ample for autocomplete prompts
-const MAX_TOKENS = 8;        // short continuation for ghost text
-const DEBOUNCE_MS = 180;     // keystroke debounce before querying the model
+// ── Mode-specific config ──────────────────────────────────────────
+const MAX_TOKENS     = 3;       // short continuation for ghost text
+const DEBOUNCE_MS    = 150;     // keystroke debounce
+const MIN_CONFIDENCE = 0.18;    // don't show ghost below 18 % confidence
 
 // ── DOM ───────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
-const editor        = $('editor');
-const editorCard    = $('editorCard');
-const loadingPanel  = $('loadingPanel');
-const loadIcon      = $('loadIcon');
-const loadTitle     = $('loadTitle');
-const loadStatus    = $('loadStatus');
-const progressWrap  = $('progressWrap');
-const progressFill  = $('progressFill');
-const progressPct   = $('progressPct');
-const progressLabel = $('progressLabel');
-const loadBadges    = $('loadBadges');
-const badgeBackend  = $('badgeBackend');
-const loadBanner    = $('loadBanner');
-const mBackend      = $('mBackend');
-const mLatency      = $('mLatency');
-const mTps          = $('mTps');
-const debugLog      = $('debugLog');
+const editor       = $('editor');
+const editorCard   = $('editorCard');
+const loadingPanel = $('loadingPanel');
+const loadIcon     = $('loadIcon');
+const loadTitle    = $('loadTitle');
+const loadStatus   = $('loadStatus');
+const progressWrap = $('progressWrap');
+const progressFill = $('progressFill');
+const progressPct  = $('progressPct');
+const progressLbl  = $('progressLabel');
+const badgeBackend = $('badgeBackend');
+const loadBanner   = $('loadBanner');
+const mBackend     = $('mBackend');
+const mLatency     = $('mLatency');
+const mConfidence  = $('mConfidence');
+const debugLog     = $('debugLog');
 
 // ── State ─────────────────────────────────────────────────────────
-let wllama = null;
 let modelReady = false;
-let currentGhost = '';          // ghost text currently displayed (as a selection)
-let _showingGhost = false;      // guard against our own input events
-let _prefixMatchPending = false; // typing matched ghost[0] — shrink, don't re-query
+let currentGhost = '';
+let _showingGhost = false;
+let _prefixMatchPending = false;
 let debounceTimer = null;
-let abortCtrl = null;           // abort in-flight completion when input changes
-let lastQuery = '';             // last text we queried (for staleness check)
+let abortCtrl = null;
+let lastQuery = '';
 
-// ── Logging ───────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  Logging & UI helpers
+// ══════════════════════════════════════════════════════════════════
 function log(...args) {
   console.log('[morpheus]', ...args);
   const line = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
@@ -78,7 +67,6 @@ function log(...args) {
   debugLog.scrollTop = debugLog.scrollHeight;
 }
 
-// ── UI helpers ────────────────────────────────────────────────────
 function setLoad(title, status) {
   loadTitle.textContent = title;
   if (status !== undefined) loadStatus.innerHTML = status;
@@ -88,7 +76,7 @@ function setProgress(pct, label) {
   progressWrap.style.display = 'block';
   progressFill.style.width = pct + '%';
   progressPct.textContent = pct + '%';
-  if (label) progressLabel.textContent = label;
+  if (label) progressLbl.textContent = label;
 }
 
 function setBackendBadge(state, text) {
@@ -112,174 +100,358 @@ function failLoading(title, err) {
     `<b>Failed to load the model.</b><br><code>${msg}</code>` +
     `<br><br>Possible causes: you are offline, the HuggingFace Hub is unreachable, ` +
     `or your browser does not support the required WebAssembly features.`);
-  // Keep the editor hidden; show debug log so the user can expand it.
   document.querySelector('details.debug').open = true;
 }
 
-// ── Model loading ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  Model loading
+// ══════════════════════════════════════════════════════════════════
 async function init() {
-  log('wllama version target:', WLLAMA_VERSION);
-  log('libllama version:', Wllama.getLibllamaVersion());
-
-  // Construct the wllama instance. isSupportWebGPU() is an instance method,
-  // so we detect the backend right after construction.
   try {
-    wllama = new Wllama({ 'default': WLLAMA_WASM });
-  } catch (e) {
-    failLoading('Could not start wllama', e);
-    return;
-  }
-
-  let supportsGPU = false;
-  try { supportsGPU = wllama.isSupportWebGPU(); } catch (e) { supportsGPU = false; }
-  log('WebGPU supported:', supportsGPU);
-  if (supportsGPU) {
-    setBackendBadge('ok', 'WebGPU available');
-  } else {
-    setBackendBadge('warn', 'WebGPU unavailable — using CPU (WASM SIMD)');
-    showBanner('warn',
-      `<b>WebGPU is not available in this browser.</b> Inference will run on the CPU ` +
-      `via single-threaded WASM SIMD — slower but functional. For GPU acceleration, ` +
-      `use a recent Chrome, Edge, or Safari 18+.`);
-  }
-
-  setLoad('Downloading model…',
-    IS_LOCAL
-      ? `Loading <code>${MODEL_FILE}</code> (${MODEL_SIZE_MB}&nbsp;MB) from the local server.`
-      : `Fetching <code>${MODEL_FILE}</code> (${MODEL_SIZE_MB}&nbsp;MB) from
-         <code>huggingface.co/${MODEL_REPO}</code>.<br>This happens once — your browser caches it.`);
-
-  try {
-    const loadOpts = {
-      n_ctx: N_CTX,
-      progressCallback: ({ loaded, total }) => {
-        if (!total) return;
-        const pct = Math.min(100, Math.round((loaded / total) * 100));
-        setProgress(pct, 'Downloading model');
-        if (pct >= 100) setLoad('Initializing model…', 'Model downloaded. Preparing the Mamba-2 recurrent state…');
-      },
-    };
-    if (IS_LOCAL) {
-      await wllama.loadModelFromUrl(MODEL_LOCAL_URL, loadOpts);
-    } else {
-      await wllama.loadModelFromHF({ repo: MODEL_REPO, file: MODEL_FILE }, loadOpts);
-    }
-  } catch (e) {
-    failLoading('Model download failed', e);
-    return;
-  }
-
-  // ── Verify model actually loaded ──
-  // loadModelFromHF/Url can return without throwing even when the worker fails
-  // to load the model (e.g. tensor-shape mismatch). The metadata then comes back
-  // all zeros — so we check and fail loudly instead of showing a broken editor.
-  let meta, addBos, eos;
-  try {
-    meta = wllama.getModelMetadata();
-    addBos = wllama.mustAddBosToken();
-    eos = wllama.getEOS();
-  } catch (e) {
-    failLoading('Model metadata unavailable', e);
-    return;
-  }
-  if (!meta?.hparams?.nVocab || meta.hparams.nVocab <= 0) {
-    failLoading('Model failed to load',
-      new Error('The model did not load correctly (vocab size is 0). ' +
-        'This usually means a tensor-shape mismatch between the GGUF and the ' +
-        'wllama/llama.cpp build. See the debug log for the underlying error.'));
-    return;
-  }
-  try {
-    const arch = meta.meta?.['general.architecture'] || 'unknown';
-    const name = meta.meta?.['general.name'] || 'unknown';
-    log('model name:', name);
-    log('architecture:', arch,
-        '| vocab:', meta.hparams?.nVocab,
-        '| layers:', meta.hparams?.nLayer,
-        '| embd:', meta.hparams?.nEmbd,
-        '| ctx_train:', meta.hparams?.nCtxTrain);
-    log('add_bos_token:', addBos, '| EOS id:', eos, '| threads:', wllama.getNumThreads());
-    if (arch !== 'mamba2' && arch !== 'mamba') {
-      showBanner('warn',
-        `<b>Unexpected architecture: <code>${arch}</code></b> (expected <code>mamba2</code>). ` +
-        `The model may not run correctly.`);
-    }
-  } catch (e) {
-    log('metadata query failed:', e);
-  }
-
-  // BOS sanity check: our model MUST NOT add a BOS token (training used raw text).
-  if (addBos) {
-    showBanner('warn',
-      `<b>Unexpected: model wants a BOS token.</b> This model was trained without one. ` +
-      `Completions may be slightly off. (add_bos_token = true)`);
-  }
-
-  // Switch UI from loading panel to editor.
-  modelReady = true;
-  loadingPanel.style.display = 'none';
-  editorCard.classList.remove('hidden');
-  const archStr = (meta && meta.meta?.['general.architecture']) || 'mamba2';
-  const backendStr = supportsGPU ? 'WebGPU' : `WASM-SIMD · ${wllama.getNumThreads()} thread`;
-  mBackend.textContent = `${archStr} · ${backendStr}`;
-  log('ready. backend =', backendStr);
-  editor.focus();
-
-  // Wire up interaction.
-  editor.addEventListener('input', onInput);
-  editor.addEventListener('keydown', onKeyDown);
-  editor.addEventListener('keyup', onKeyUp);
-  editor.addEventListener('mousedown', onMouseDown);
-  editor.addEventListener('mouseup', onMouseUp);
-  document.querySelectorAll('#exampleChips .chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      editor.value = chip.dataset.text;
-      editor.focus();
-      const end = editor.value.length;
-      editor.setSelectionRange(end, end);
-      onInput();
+    const { supportsGPU, arch } = await loadModel({
+      onLog: log,
+      onProgress: (pct) => setProgress(pct, 'Downloading model'),
+      onStatus: (title, html) => setLoad(title, html),
+      onBackendBadge: setBackendBadge,
+      onBanner: (type, html) => { if (type === 'warn') showBanner('warn', html); },
     });
-  });
 
-  // Trigger an initial completion so the user immediately sees it working.
-  editor.value = 'Kaixo, zer ';
-  editor.setSelectionRange(editor.value.length, editor.value.length);
-  onInput();
+    // ── Switch to editor ──
+    modelReady = true;
+    loadingPanel.style.display = 'none';
+    editorCard.classList.remove('hidden');
+    const backendStr = supportsGPU ? 'WebGPU' : `WASM-SIMD`;
+    mBackend.textContent = `${arch} · ${backendStr}`;
+    log('ready. backend =', backendStr);
+    editor.focus();
+
+    // Wire up interaction
+    editor.addEventListener('input', onInput);
+    editor.addEventListener('keydown', onKeyDown);
+    editor.addEventListener('keyup', onKeyUp);
+    editor.addEventListener('mousedown', onMouseDown);
+    editor.addEventListener('mouseup', onMouseUp);
+    document.querySelectorAll('#exampleChips .chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        editor.value = chip.dataset.text;
+        editor.focus();
+        const end = editor.value.length;
+        editor.setSelectionRange(end, end);
+        onInput();
+      });
+    });
+
+    // Trigger an initial completion
+    editor.value = 'Kaixo, zer ';
+    editor.setSelectionRange(editor.value.length, editor.value.length);
+    onInput();
+  } catch (e) {
+    failLoading('Initialization failed', e);
+  }
 }
 
-// ── Completion ────────────────────────────────────────────────────
-async function complete(text) {
-  // Abort any in-flight request — only the latest keystroke matters.
-  if (abortCtrl) { try { abortCtrl.abort(); } catch (e) {} }
-  abortCtrl = new AbortController();
+// ══════════════════════════════════════════════════════════════════
+//  Inference — digit-token repair (ghost-mode specific)
+// ══════════════════════════════════════════════════════════════════
 
+/**
+ * Extract average confidence from logprobs.
+ * Excludes EOS/stop tokens (logprob near 0.0 → prob near 1.0) which
+ * are not real predictions and would inflate the average.
+ */
+function computeConfidence(logprobs) {
+  const content = logprobs?.content;
+  if (!content || !content.length) return 1.0;
+  const real = content
+    .filter(c => c.logprob < -0.01)
+    .map(c => Math.exp(c.logprob));
+  if (real.length === 0) return 0.0;
+  return real.reduce((a, b) => a + b, 0) / real.length;
+}
+
+/**
+ * Extract next-token candidates from logprobs position 0.
+ * Returns [{text, prob}, ...] — digit and garbage tokens are skipped.
+ */
+function extractCandidates(logprobs, topK = 3) {
+  const content = logprobs?.content;
+  if (!content?.[0]?.top_logprobs) return [];
+  const candidates = [];
+  const seen = new Set();
+  for (const tok of content[0].top_logprobs) {
+    const text = tok.token || '';
+    if (!text.trim()) continue;
+    if (tokenHasDigit(text)) continue;
+    if (hasByteFallbackGarbage(text)) continue;
+    if (seen.has(text)) continue;
+    seen.add(text);
+    candidates.push({ text, prob: Math.exp(tok.logprob) });
+    if (candidates.length >= topK) break;
+  }
+  return candidates;
+}
+
+/**
+ * Generate completion with digit-token repair.
+ *
+ * Strategy (ported from server.py::_generate_with_repair):
+ *   1. Generate max_tokens with top-k logprobs per position.
+ *   2. Walk the greedy path. If a token contains digits, swap it for the
+ *      best non-digit alternative from top_logprobs.
+ *   3. If no swap was needed → return original content (zero extra cost).
+ *   4. If a swap changed the path → re-generate from the swap point so
+ *      subsequent tokens are correctly conditioned.
+ *   5. If a digit token has NO non-digit alternative: if it's the first
+ *      token, return empty; otherwise truncate at the good prefix.
+ *
+ * Returns { suggestion, confidence, candidates, latency }.
+ */
+async function generateWithRepair(prompt, maxTokens) {
   const t0 = performance.now();
-  try {
-    const response = await wllama.createCompletion({
-      prompt: text,
-      max_tokens: MAX_TOKENS,
-      temperature: 0,   // greedy decoding
-      top_p: 1.0,
-      stream: false,
-      abortSignal: abortCtrl.signal,
-    });
-    const elapsed = performance.now() - t0;
-    const out = response.choices?.[0]?.text ?? '';
-    const timings = response.timings || {};
-    return { text: out, elapsed, timings };
-  } catch (e) {
-    if (e && (e.name === 'AbortError' || /abort/i.test(e.message || ''))) return null; // superseded
-    log('completion error:', e);
-    return null;
+
+  // ── First call ──
+  const resp = await complete(prompt, { maxTokens, abortSignal: abortCtrl?.signal });
+
+  const choice   = resp.choices?.[0] ?? {};
+  const content  = choice.text ?? '';
+  const logprobs = choice.logprobs;
+
+  const candidates  = extractCandidates(logprobs);
+  const confidence  = computeConfidence(logprobs);
+  const latency     = performance.now() - t0;
+
+  const lpContent = logprobs?.content;
+  if (!lpContent?.length) {
+    // No logprobs → return raw content (digit repair disabled)
+    return { suggestion: content, confidence, candidates, latency };
   }
+
+  // ── Walk the greedy path, looking for digit tokens to repair ──
+  const repairedTexts = [];
+  let firstSwap = -1;
+
+  for (let i = 0; i < lpContent.length; i++) {
+    const chosen = lpContent[i].token || '';
+    const needsRepair = tokenHasDigit(chosen) || (i === 0 && !chosen.trim());
+
+    if (needsRepair) {
+      // Find best non-digit alternative (top_logprobs sorted by logprob desc)
+      const alts = lpContent[i].top_logprobs || [];
+      let foundAlt = false;
+
+      for (const alt of alts) {
+        const altToken = alt.token || '';
+        if (!tokenHasDigit(altToken) && altToken.trim() && altToken !== chosen) {
+          repairedTexts.push(altToken);
+          if (firstSwap === -1) firstSwap = i;
+          foundAlt = true;
+          break;
+        }
+      }
+
+      if (!foundAlt) {
+        // Can't repair this position
+        if (i === 0) {
+          return { suggestion: '', confidence, candidates, latency };
+        }
+        // Truncate at good prefix
+        return { suggestion: repairedTexts.join(''), confidence, candidates, latency };
+      }
+    } else {
+      repairedTexts.push(chosen);
+    }
+  }
+
+  if (firstSwap === -1) {
+    // No digit tokens → return original content (zero extra cost)
+    return { suggestion: content, confidence, candidates, latency };
+  }
+
+  // ── Re-generate from the first swap point ──
+  const prefixText = repairedTexts.slice(0, firstSwap + 1).join('');
+  const remaining  = maxTokens - (firstSwap + 1);
+
+  if (remaining <= 0) {
+    return { suggestion: prefixText, confidence, candidates, latency };
+  }
+
+  const regen = await complete(prompt + prefixText, { maxTokens: remaining });
+  const regenContent = regen.choices?.[0]?.text ?? '';
+  return {
+    suggestion: prefixText + regenContent,
+    confidence,
+    candidates,
+    latency: performance.now() - t0,
+  };
 }
 
-// ── Ghost text (selection-based, like the sibling demo) ───────────
+// ══════════════════════════════════════════════════════════════════
+//  Ghost suffix (overlap computation)
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * Compute the ghost suffix to display, given the typed prefix and the
+ * model's suggestion.
+ *
+ * If the user already typed part of the prediction, only show the
+ * non-typed suffix. Also deduplicates punctuation at the boundary.
+ */
+function ghostSuffix(prefix, ctx, suggestion) {
+  if (!suggestion) return '';
+
+  // If the suggestion starts with the context tail, show only the suffix
+  const ctxLower = ctx.toLowerCase();
+  const sugLower = suggestion.toLowerCase();
+
+  if (sugLower.startsWith(ctxLower)) {
+    return suggestion.slice(ctx.length);
+  }
+
+  // Check overlap: typed text ends with part of the suggestion start
+  for (let i = Math.min(prefix.length, suggestion.length); i >= 1; i--) {
+    if (prefix.slice(-i).toLowerCase() === suggestion.slice(0, i).toLowerCase()) {
+      return suggestion.slice(i);
+    }
+  }
+
+  return suggestion;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Retokenization fallback (byte-fallback garbage rescue)
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * Simplified retokenization fallback for byte-fallback garbage.
+ *
+ * When the suggestion contains non-Latin chars (byte-fallback garbage),
+ * the typed prefix's tokenization may be incompatible. Try progressively
+ * shorter prefixes to land on a compatible path.
+ *
+ * Returns a clean suggestion string, or '' if nothing usable found.
+ */
+async function keyboardFallback(text) {
+  const [textBeforeWord, currentWord] = extractCurrentWord(text);
+  if (!currentWord) return '';
+
+  const maxFallback = Math.min(2, currentWord.length - 1);
+  for (let fallback = 0; fallback <= maxFallback; fallback++) {
+    const shorterLen = currentWord.length - fallback;
+    if (shorterLen < 1) break;
+    const shorterWord = currentWord.slice(0, shorterLen);
+    const prefix = textBeforeWord + shorterWord;
+
+    let resp;
+    try {
+      resp = await complete(prefix, { maxTokens: 5, abortSignal: abortCtrl?.signal });
+    } catch { continue; }
+
+    const content = resp.choices?.[0]?.text ?? '';
+    if (!content || hasByteFallbackGarbage(content)) continue;
+
+    // Greedy multi-token word completion
+    const firstWord = extractFirstWord(content);
+    if (firstWord) {
+      const fullWord = shorterWord + firstWord;
+      if (fullWord.startsWith(currentWord)
+          && fullWord.length >= currentWord.length
+          && !tokenHasDigit(fullWord)
+          && !hasByteFallbackGarbage(fullWord)) {
+        // Return only the untyped suffix as ghost
+        return fullWord.slice(currentWord.length);
+      }
+    }
+
+    // Top-k single-token alternatives at position 0
+    const alts = resp.choices?.[0]?.logprobs?.content?.[0]?.top_logprobs || [];
+    for (const alt of alts) {
+      const token = alt.token || '';
+      if (!token.trim() || tokenHasDigit(token) || hasByteFallbackGarbage(token)) continue;
+      // A whitespace-prefixed token means model thinks current word is complete
+      if (/\s/.test(token[0])) {
+        const nextWord = token.trim();
+        if (nextWord && !hasByteFallbackGarbage(nextWord)) return ' ' + nextWord;
+        continue;
+      }
+      const fullWord = shorterWord + token;
+      if (fullWord.startsWith(currentWord) && fullWord.length >= currentWord.length) {
+        return fullWord.slice(currentWord.length);
+      }
+    }
+  }
+
+  return '';
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Completion orchestration (mirrors demo's autocomplete_greedy flow)
+// ══════════════════════════════════════════════════════════════════
+
+async function doComplete(prefix) {
+  if (!modelReady) return;
+  lastQuery = prefix;
+
+  // smart_context: currently pass-through (full text)
+  const ctx = prefix;
+
+  // Generate with digit repair
+  let result;
+  try {
+    result = await generateWithRepair(ctx, MAX_TOKENS);
+  } catch (e) {
+    if (e?.name === 'AbortError' || /abort/i.test(e?.message || '')) return;
+    log('completion error:', e);
+    return;
+  }
+
+  // Staleness guard
+  if (lastQuery !== prefix) return;
+  if (getPrefix() !== prefix) { clearGhost(); return; }
+
+  // Update metrics
+  mLatency.textContent = Math.round(result.latency) + ' ms';
+  mConfidence.textContent = (result.confidence * 100).toFixed(1) + '%';
+
+  let suggestion = result.suggestion;
+
+  // filter_suggestion: strip artifacts, collapse punct, reject pure-punct
+  suggestion = filterSuggestion(suggestion);
+
+  // If suggestion is pure punct and user already ends with punct, drop it
+  if (isPurePunct(suggestion) && ctx.trim()
+      && CONFIG.PUNCT_CHARS.includes(ctx.trim().slice(-1))) {
+    suggestion = '';
+  }
+
+  // Byte-fallback garbage fallback: retokenization rescue
+  if (suggestion && hasByteFallbackGarbage(suggestion)) {
+    log('byte-fallback garbage detected, trying retokenization fallback…');
+    const rescued = await keyboardFallback(prefix);
+    suggestion = rescued || '';
+  }
+
+  // ghost_suffix: overlap computation + punct dedup
+  const ghost = ghostSuffix(prefix, ctx, suggestion);
+
+  // Confidence threshold
+  if (result.confidence < MIN_CONFIDENCE) {
+    clearGhost();
+    return;
+  }
+
+  if (ghost) showGhost(ghost);
+  else clearGhost();
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Ghost text (selection-based, like the sibling demo)
+// ══════════════════════════════════════════════════════════════════
+
 function showGhost(suggestion) {
   if (!suggestion) { currentGhost = ''; return; }
   const start = editor.selectionStart;
   const end = editor.selectionEnd;
-  if (start !== end) return; // don't clobber an existing selection
+  if (start !== end) return;
   currentGhost = suggestion;
   _showingGhost = true;
   editor.value = editor.value.substring(0, start) + suggestion + editor.value.substring(end);
@@ -302,61 +474,47 @@ function clearGhost() {
 
 function getPrefix() { return editor.value.substring(0, editor.selectionStart); }
 
-// ── Input handling ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  Input handling
+// ══════════════════════════════════════════════════════════════════
+
 function onInput() {
   if (_showingGhost) return;
 
-  // Prefix-match shrink: user typed the first char of the ghost → shrink it,
-  // no need to re-query the model.
+  // Prefix-match shrink: user typed the first char of the ghost → shrink
   if (_prefixMatchPending) {
     _prefixMatchPending = false;
     currentGhost = currentGhost.slice(1);
     if (currentGhost) { showGhost(currentGhost); return; }
-    // Ghost fully consumed — fall through to re-query.
+    // Ghost fully consumed — fall through to re-query
   }
 
-  // Only autocomplete when the cursor is at the end of the text.
+  // Only autocomplete when cursor is at the end of the text
   if (editor.selectionStart !== editor.value.length) { clearGhost(); return; }
 
   const prefix = getPrefix();
   clearGhost();
   if (!prefix.trim()) {
-    mLatency.textContent = '—'; mTps.textContent = '—';
+    mLatency.textContent = '—';
+    mConfidence.textContent = '—';
     return;
   }
 
   clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => doComplete(prefix), DEBOUNCE_MS);
+  debounceTimer = setTimeout(() => {
+    // Abort any in-flight request — only the latest keystroke matters
+    if (abortCtrl) { try { abortCtrl.abort(); } catch {} }
+    abortCtrl = new AbortController();
+    doComplete(prefix);
+  }, DEBOUNCE_MS);
 }
 
-async function doComplete(prefix) {
-  if (!modelReady) return;
-  lastQuery = prefix;
-  const result = await complete(prefix);
-  if (!result) return;
-  // Staleness guard: user may have typed more since we sent this query.
-  if (lastQuery !== prefix) return;
-  if (getPrefix() !== prefix) { clearGhost(); return; }
+// ══════════════════════════════════════════════════════════════════
+//  Keyboard interaction
+// ══════════════════════════════════════════════════════════════════
 
-  // Update latency / throughput metrics.
-  mLatency.textContent = result.elapsed.toFixed(0) + ' ms';
-  const tps = result.timings?.predicted_per_second;
-  if (tps) mTps.textContent = tps.toFixed(1);
-  else if (result.timings?.predicted_n && result.timings?.predicted_ms) {
-    mTps.textContent = (result.timings.predicted_n / (result.timings.predicted_ms / 1000)).toFixed(1);
-  } else {
-    mTps.textContent = (MAX_TOKENS / (result.elapsed / 1000)).toFixed(1);
-  }
-
-  let suggestion = result.text;
-  // Trim trailing whitespace/newlines that would make the ghost look odd.
-  suggestion = suggestion.replace(/\s+$/, '');
-  if (suggestion) showGhost(suggestion);
-}
-
-// ── Keyboard interaction ──────────────────────────────────────────
 function onKeyDown(e) {
-  // Tab → accept the ghost (move cursor to end of the selection).
+  // Tab → accept ghost
   if (e.key === 'Tab') {
     if (editor.selectionStart !== editor.selectionEnd) {
       e.preventDefault();
@@ -364,16 +522,17 @@ function onKeyDown(e) {
       editor.setSelectionRange(end, end);
       editor.classList.remove('ghost-active');
       currentGhost = '';
+      // Fetch next prediction after accepting
+      onInput();
     }
     return;
   }
-  // Escape → dismiss ghost.
+  // Escape → dismiss ghost
   if (e.key === 'Escape') {
     if (currentGhost) { e.preventDefault(); clearGhost(); }
     return;
   }
-  // If a ghost is showing and the user types its first char, shrink it
-  // instead of clearing + re-querying (smoother UX, fewer model calls).
+  // If ghost is showing and user types its first char, shrink it
   if (editor.selectionStart !== editor.selectionEnd && currentGhost) {
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.key.startsWith('Arrow') && e.key.length === 1) {
       if (e.key === currentGhost[0]) {
@@ -381,30 +540,26 @@ function onKeyDown(e) {
         const start = editor.selectionStart;
         editor.value = editor.value.substring(0, start) + editor.value.substring(editor.selectionEnd);
         editor.setSelectionRange(start, start);
-        return; // let the browser type the char naturally, then onInput shrinks the ghost
+        return;
       }
-      clearGhost(); // divergent char — clear, let it type, re-query
+      clearGhost();
     }
   }
 }
 
 function onKeyUp(e) {
-  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
-    clearGhost();
-  }
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) clearGhost();
 }
 
 function onMouseDown() {
-  // Clear ghost on click so the user can reposition the cursor freely.
   if (editor.selectionStart !== editor.selectionEnd) clearGhost();
 }
 function onMouseUp() {
-  // After a click at end of text, refresh the suggestion.
-  if (editor.selectionStart === editor.selectionEnd &&
-      editor.selectionStart === editor.value.length) {
+  if (editor.selectionStart === editor.selectionEnd
+      && editor.selectionStart === editor.value.length) {
     onInput();
   }
 }
 
 // ── Go ────────────────────────────────────────────────────────────
-init().catch(e => failLoading('Initialization failed', e));
+init();

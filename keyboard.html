@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="eu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Morpheus — Basque Predictive Keyboard</title>
+  <meta name="description" content="A phone-style Basque predictive keyboard running a 91M-parameter Mamba-2 model entirely in your browser.">
+  <link rel="stylesheet" href="keyboard.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232563eb'/><text x='50' y='70' font-size='60' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'>M</text></svg>">
+</head>
+<body>
+
+  <!-- ── Loading panel (shown first; hidden when model ready) ── -->
+  <div class="loading-overlay" id="loadingPanel">
+    <div class="loading-card">
+      <div class="icon-wrap spin" id="loadIcon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+        </svg>
+      </div>
+      <h2 id="loadTitle">Initializing wllama runtime…</h2>
+      <div class="status-text" id="loadStatus">Loading the WebAssembly binding for llama.cpp.</div>
+
+      <div class="progress-wrap" id="progressWrap" style="display:none;">
+        <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+        <div class="progress-meta">
+          <span id="progressLabel">Downloading model</span>
+          <span id="progressPct">0%</span>
+        </div>
+      </div>
+
+      <div class="badges">
+        <span class="badge" id="badgeBackend"><span class="dot"></span>detecting backend…</span>
+      </div>
+
+      <div class="banner" id="loadBanner"></div>
+    </div>
+  </div>
+
+  <!-- ── App ── -->
+  <div class="header">
+    <div>
+      <span class="status-dot offline" id="statusDot"></span>
+      <span class="title">Morpheus</span>
+    </div>
+    <div class="header-right">
+      <span class="metric" id="mLatency">—</span>
+      <a class="link" href="./">← ghost mode</a>
+    </div>
+  </div>
+
+  <div class="chat-area" id="chatArea"></div>
+
+  <div class="input-bar">
+    <div class="input-wrapper">
+      <textarea id="editor" rows="1" placeholder="Idatzi mezua..."
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+    </div>
+    <button class="send-btn" id="sendBtn" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+    </button>
+  </div>
+
+  <div class="suggestion-bar" id="suggestionBar">
+    <div class="chip placeholder">Idatzi letra bat gutxienez...</div>
+  </div>
+
+  <div class="keyboard" id="keyboard">
+    <div class="kb-row" data-row="1"></div>
+    <div class="kb-row" data-row="2"></div>
+    <div class="kb-row" data-row="3"></div>
+    <div class="kb-row" data-row="4"></div>
+  </div>
+
+  <script type="module" src="keyboard.js"></script>
+</body>
+</html>
