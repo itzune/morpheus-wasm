@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Morpheus — Euskal autocomplete (in-browser)</title>
   <meta name="description" content="A 91M-parameter Mamba-2 Basque language model running entirely in your browser via wllama (WebAssembly + WebGPU). No server.">
+  <!-- coi-serviceworker: injects COOP/COEP headers via a service worker so
+       SharedArrayBuffer is available → multi-threaded WASM on GitHub Pages. -->
+  <script src="coi-serviceworker.min.js"></script>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232563eb'/><text x='50' y='70' font-size='60' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'>M</text></svg>">
 </head>

@@ -6,15 +6,17 @@
 // keyboard-candidates algorithm ported from demo/server.py.
 // ──────────────────────────────────────────────────────────────────
 
-import { Wllama } from 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.5.1/esm/index.js';
+import { Wllama } from 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.js';
 
 // ── Config ────────────────────────────────────────────────────────
 export const CONFIG = {
-  WLLAMA_VERSION: '3.5.1',
-  WLLAMA_CDN:     'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.5.1',
+  WLLAMA_VERSION: '3.6.1',
+  WLLAMA_CDN:     'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1',
   MODEL_REPO:     'itzune/morpheus-gguf',
   MODEL_FILE:     'morpheus-v2-mamba.Q4_K_M.ugm.gguf',
   N_CTX:          2048,
+  N_PARALLEL:     4,      // parallel inference slots (needs wllama 3.6.0+, PR #270)
+  N_THREADS:      Math.max(1, navigator.hardwareConcurrency || 4),
   N_PROBS:        5,      // top-k logprobs per position
   PENALTY_REPEAT: 1.1,
   PUNCT_CHARS:    '.!,?;:()[]{}',
@@ -173,6 +175,14 @@ export async function loadModel(callbacks = {}) {
 
   const loadOpts = {
     n_ctx: CONFIG.N_CTX,
+    n_threads: CONFIG.N_THREADS,
+    n_parallel: CONFIG.N_PARALLEL,
+    // Mamba is recurrent: each parallel slot must own its SSM state.
+    // kv_unified:false gives every slot its own cache (n_ctx / n_parallel)
+    // instead of sharing one — required for parallel recurrent inference.
+    kv_unified: false,
+    n_batch: 512,
+    n_ubatch: 512,
     progressCallback: ({ loaded, total }) => {
       if (!total) return;
       const pct = Math.min(100, Math.round((loaded / total) * 100));
@@ -352,17 +362,13 @@ async function _wordCompletionCandidates(textBeforeWord, currentWord, maxTokens,
     fallbackPaths.push({ shorterWord: '', prefix: textBeforeWord, isFromScratch: true });
   }
 
-  // Fire calls sequentially (wllama uses a single llama.cpp context —
-  // parallel completions on a recurrent model conflict)
-  const results = [];
-  for (const p of fallbackPaths) {
-    try {
-      const resp = await complete(p.prefix, { maxTokens, abortSignal });
-      results.push({ status: 'fulfilled', value: resp });
-    } catch (e) {
-      results.push({ status: 'rejected', reason: e });
-    }
-  }
+  // Fire all fallback paths in parallel. wllama 3.6.0+ (PR #270) fixed the
+  // concurrent-completion bug that previously forced sequential calls, and
+  // loadModel() sets n_parallel + kv_unified:false so each slot gets its
+  // own SSM state — required for a recurrent (Mamba) model.
+  const results = await Promise.allSettled(
+    fallbackPaths.map(p => complete(p.prefix, { maxTokens, abortSignal }))
+  );
 
   // candidates_map: word -> {text, prob, is_next_word?}
   // Next-word candidates use a separate key namespace ("__next__" + word)

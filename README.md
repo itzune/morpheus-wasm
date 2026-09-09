@@ -12,7 +12,7 @@ Two modes:
 
 ![status: working](https://img.shields.io/badge/status-working-brightgreen)
 ![model: 91M Mamba-2](https://img.shields.io/badge/model-91M%20Mamba--2-blue)
-![backend: wllama 3.5.1](https://img.shields.io/badge/wllama-3.5.1-purple)
+![backend: wllama 3.6.1](https://img.shields.io/badge/wllama-3.6.1-purple)
 
 ---
 
@@ -50,7 +50,7 @@ works correctly in wllama. Both are applied in a single pass by
 ### 1. Head-count fix (load compatibility)
 
 The llama.cpp HuggingFace converter writes
-`mamba2.attention.head_count = 0` (commented "unused"). wllama 3.5.1's
+`mamba2.attention.head_count = 0` (commented "unused"). wllama 3.6.1's
 bundled llama.cpp uses `head_count` to compute the `ssm_in` tensor width
 (`2*d_inner + 2*n_group*d_state + n_head`), so 0 makes it reject the model.
 Setting `head_count = 24` (= `d_inner/head_dim` = `dt_rank`) produces the
@@ -100,12 +100,12 @@ both modes.
 
 | Strategy | Description |
 |---|---|
-| **`keyboardCandidates()`** | Ported from `demo/server.py::_keyboard_candidates`. Two modes: **next-word prediction** (cursor after space — single call, returns top-k first-token words + greedy word) and **word completion** (cursor mid-word — tries progressively shorter prefixes sequentially, extracts greedy multi-token completions + top-k single-token alternatives, also detects next-word candidates when the model predicts a space token). |
+| **`keyboardCandidates()`** | Ported from `demo/server.py::_keyboard_candidates`. Two modes: **next-word prediction** (cursor after space — single call, returns top-k first-token words + greedy word) and **word completion** (cursor mid-word — tries progressively shorter prefixes in parallel, extracts greedy multi-token completions + top-k single-token alternatives, also detects next-word candidates when the model predicts a space token). |
 | **Sticky merge** | Carries forward previous candidates that match the new prefix. Prevents predictions from vanishing when the user types the first letter of a predicted word and the tokenization path switches. Sticky survivors get a small probability boost. |
 | **Android-style chip layout** | 3 chips with the highest-probability word in the CENTER (like Gboard). 2 chips: [2nd, 1st]. 1 chip: [1st]. |
 | **Chip acceptance** | Different handling for word completions (replace partial word + trailing space), next-word suggestions (insert with leading space), and punctuation (attach to previous word, no space before). |
 | **Virtual keyboard** | Full QWERTY layout with ñ, shift (one-shot + auto-shift after sentence-ending punctuation), symbol layout (123/ABC toggle), long-press for accented characters (é, ü, ñ, ç, …), backspace, space, enter (send message). |
-| **Sequential fallback paths** | wllama uses a single llama.cpp context — parallel completions on a recurrent model conflict. Fallback paths run sequentially instead of `Promise.all`.
+| **Parallel fallback paths** | Word-completion fallback paths (progressively shorter prefixes + from-scratch) run concurrently via `Promise.allSettled`. Needs wllama 3.6.0+ (PR #270 fixed the concurrent-completion bug); `loadModel()` sets `n_parallel` + `kv_unified:false` so each slot owns its SSM state (required for a recurrent model). |
 
 ---
 
