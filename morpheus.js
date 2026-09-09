@@ -20,6 +20,16 @@ export const CONFIG = {
   N_PROBS:        5,      // top-k logprobs per position
   PENALTY_REPEAT: 1.1,
   PUNCT_CHARS:    '.!,?;:()[]{}',
+  // ── Experimental latency knobs (Tier 2 measurement) ──
+  // cache_prompt: ask llama-server to reuse the slot's cached prompt prefix
+  //   across calls. For transformers this is a big win; for Mamba the
+  //   *append* case (ghost mode: each keystroke = prev prompt + 1 token)
+  //   may hit, but the *truncate* case (keyboard fallback prefixes) is
+  //   upstream-broken (llama.cpp #19264) → clears & recomputes (safe, no gain).
+  //   Set to true and watch usage.prompt_tokens_details.cached_tokens.
+  CACHE_PROMPT:      true,
+  // timings_per_token: request per-token ms breakdown in the response.
+  TIMINGS_PER_TOKEN: true,
 };
 
 export const IS_LOCAL      = ['localhost', '127.0.0.1', '0.0.0.0'].includes(location.hostname);
@@ -183,6 +193,10 @@ export async function loadModel(callbacks = {}) {
     kv_unified: false,
     n_batch: 512,
     n_ubatch: 512,
+    // Backend toggle: ?cpu=1 forces CPU (WASM SIMD) by offloading 0 layers,
+    // for A/B comparison against WebGPU. Without the param, wllama auto-
+    // offloads all layers when WebGPU is available.
+    n_gpu_layers: new URLSearchParams(location.search).has('cpu') ? 0 : undefined,
     progressCallback: ({ loaded, total }) => {
       if (!total) return;
       const pct = Math.min(100, Math.round((loaded / total) * 100));
@@ -253,8 +267,43 @@ export async function complete(prompt, { maxTokens = 3, abortSignal = null } = {
     n_probs: CONFIG.N_PROBS,
     logprobs: CONFIG.N_PROBS,
     stream: false,
+    // Forwarded to llama-server (wllama spreads all options into the request
+    // JSON, so untyped fields pass through). cache_prompt enables slot prefix
+    // reuse; timings_per_token returns the ms/token breakdown.
+    cache_prompt: CONFIG.CACHE_PROMPT,
+    timings_per_token: CONFIG.TIMINGS_PER_TOKEN,
     abortSignal: abortSignal ?? undefined,
   });
+}
+
+/**
+ * Extract a flat timings summary from a wllama completion response.
+ * Returns null if the server didn't emit timings.
+ *
+ * Fields (from llama-server ResultTimings):
+ *   prompt_n            tokens evaluated for the prompt
+ *   prompt_ms           wall time for prompt eval
+ *   predicted_n         tokens generated
+ *   predicted_ms        wall time for generation
+ *   predicted_per_token_ms
+ *   cached_tokens       prompt tokens served from cache (usage.prompt_tokens_details)
+ */
+export function extractTimings(resp) {
+  if (!resp) return null;
+  const t = resp.timings;
+  const cached = resp.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+  if (!t) return { cachedTokens: cached, hasTimings: false };
+  return {
+    hasTimings:      true,
+    promptN:         t.prompt_n,
+    promptMs:        t.prompt_ms,
+    predictedN:      t.predicted_n,
+    predictedMs:     t.predicted_ms,
+    predictedPerTokenMs: t.predicted_per_token_ms,
+    predictedPerSecond:  t.predicted_per_second,
+    promptPerSecond:    t.prompt_n ? (t.prompt_n / (t.prompt_ms / 1000)) : 0,
+    cachedTokens:    cached,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════════

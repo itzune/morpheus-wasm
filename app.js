@@ -18,7 +18,7 @@
 
 import {
   CONFIG, IS_LOCAL, MODEL_LOCAL, MODEL_SIZE_MB,
-  loadModel, complete,
+  loadModel, complete, extractTimings,
   tokenHasDigit, hasByteFallbackGarbage, isPurePunct,
   extractCurrentWord, extractFirstWord,
   filterSuggestion,
@@ -219,11 +219,12 @@ async function generateWithRepair(prompt, maxTokens) {
   const candidates  = extractCandidates(logprobs);
   const confidence  = computeConfidence(logprobs);
   const latency     = performance.now() - t0;
+  const timings     = extractTimings(resp);
 
   const lpContent = logprobs?.content;
   if (!lpContent?.length) {
     // No logprobs → return raw content (digit repair disabled)
-    return { suggestion: content, confidence, candidates, latency };
+    return { suggestion: content, confidence, candidates, latency, timings };
   }
 
   // ── Walk the greedy path, looking for digit tokens to repair ──
@@ -252,10 +253,10 @@ async function generateWithRepair(prompt, maxTokens) {
       if (!foundAlt) {
         // Can't repair this position
         if (i === 0) {
-          return { suggestion: '', confidence, candidates, latency };
+          return { suggestion: '', confidence, candidates, latency, timings };
         }
         // Truncate at good prefix
-        return { suggestion: repairedTexts.join(''), confidence, candidates, latency };
+        return { suggestion: repairedTexts.join(''), confidence, candidates, latency, timings };
       }
     } else {
       repairedTexts.push(chosen);
@@ -264,7 +265,7 @@ async function generateWithRepair(prompt, maxTokens) {
 
   if (firstSwap === -1) {
     // No digit tokens → return original content (zero extra cost)
-    return { suggestion: content, confidence, candidates, latency };
+    return { suggestion: content, confidence, candidates, latency, timings };
   }
 
   // ── Re-generate from the first swap point ──
@@ -272,7 +273,7 @@ async function generateWithRepair(prompt, maxTokens) {
   const remaining  = maxTokens - (firstSwap + 1);
 
   if (remaining <= 0) {
-    return { suggestion: prefixText, confidence, candidates, latency };
+    return { suggestion: prefixText, confidence, candidates, latency, timings };
   }
 
   const regen = await complete(prompt + prefixText, { maxTokens: remaining });
@@ -282,6 +283,7 @@ async function generateWithRepair(prompt, maxTokens) {
     confidence,
     candidates,
     latency: performance.now() - t0,
+    timings: extractTimings(regen) ?? timings,
   };
 }
 
@@ -411,6 +413,21 @@ async function doComplete(prefix) {
   // Update metrics
   mLatency.textContent = Math.round(result.latency) + ' ms';
   mConfidence.textContent = (result.confidence * 100).toFixed(1) + '%';
+
+  // Tier 2 measurement: log per-token timings + cache hits to the debug panel.
+  // This is what tells us whether cache_prompt helps Mamba autocomplete.
+  const tm = result.timings;
+  if (tm?.hasTimings) {
+    log(
+      `timings: prompt ${tm.promptN}tok/${tm.promptMs.toFixed(0)}ms` +
+      ` (${tm.promptPerSecond.toFixed(0)} tok/s)` +
+      ` | gen ${tm.predictedN}tok/${tm.predictedMs.toFixed(0)}ms` +
+      ` (${tm.predictedPerTokenMs.toFixed(0)} ms/tok, ${tm.predictedPerSecond.toFixed(1)} tok/s)` +
+      ` | cached ${tm.cachedTokens}/${tm.promptN}tok`
+    );
+  } else if (tm) {
+    log(`timings: (no per-token breakdown) cached ${tm.cachedTokens}tok`);
+  }
 
   let suggestion = result.suggestion;
 
